@@ -1,0 +1,3 @@
+-keep class com.modmenu.loader.NativeLoader { *; }
+-keep class com.modmenu.loader.MainActivity { *; }
+-keep class com.modmenu.loader.OverlayService { *; }

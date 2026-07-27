@@ -1,0 +1,30 @@
+# Binaries & APKs
+*.apk
+*.xapk
+
+# Secrets
+*.jks
+local.properties
+
+# Build
+build/
+.cxx/
+.gradle/
+*.bak
+
+# Decompiled APKs
+decompiled_s2/
+
+# Dump files
+dump.cs
+il2cpp.h
+script.json
+
+# Analysis
+cheat_analysis/
+
+# Old overlay
+standoff_overlay/
+
+# Tools
+tools/

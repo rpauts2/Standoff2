@@ -1,0 +1,84 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath 'com.android.tools.build:gradle:8.4.0'
+    }
+}
+
+allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'com.modmenu.loader'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.modmenu.loader'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                cppFlags '-std=c++17'
+                arguments '-DANDROID_STL=c++_shared'
+            }
+        }
+    }
+
+    signingConfigs {
+        release {
+            storeFile file("../release-key.jks")
+            storePassword "password123"
+            keyAlias "modmenu"
+            keyPassword "password123"
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('../jni/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        viewBinding true
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+}
