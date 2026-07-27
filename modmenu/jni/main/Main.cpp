@@ -4,6 +4,7 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <vector>
 #include <unistd.h>
 #include <cstring>
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include "imgui.h"
 #include "imgui_impl_android.h"
 #include "imgui_impl_opengl3.h"
+#include "GameData.h"
 
 #undef LOGI
 #undef LOGE
@@ -25,27 +27,18 @@
 
 // ==================== ARM64 Hook Helpers ====================
 static inline uint32_t arm64_movz(int reg, uint16_t imm, int shift) {
-    // MOVZ Xd, #imm{, LSL #shift}
-    // shift: 0=0, 1=16, 2=32, 3=48
     return 0xD2800000 | ((shift & 3) << 21) | ((uint32_t)imm << 5) | (reg & 0x1F);
 }
 
 static inline uint32_t arm64_movk(int reg, uint16_t imm, int shift) {
-    // MOVK Xd, #imm{, LSL #shift}
     return 0xF2800000 | ((shift & 3) << 21) | ((uint32_t)imm << 5) | (reg & 0x1F);
 }
 
 static inline uint32_t arm64_br(int reg) {
-    // BR Xn
     return 0xD61F0000 | ((reg & 0x1F) << 5);
 }
 
-static inline uint32_t arm64_nop() {
-    return 0xD503201F;
-}
-
 static void arm64_patch_jump(uint32_t* target, uint64_t dest) {
-    // Write: movz x16, #low16; movk x16, #mid16, lsl#16; movk x16, #high16, lsl#32; br x16
     target[0] = arm64_movz(16, dest & 0xFFFF, 0);
     target[1] = arm64_movk(16, (dest >> 16) & 0xFFFF, 1);
     target[2] = arm64_movk(16, (dest >> 32) & 0xFFFF, 2);
@@ -126,6 +119,12 @@ public:
     void addSpinner(const char* n, const char** items, int c) {
         features.push_back({n, false, 0, 0, 1, 2, items, c, 0});
     }
+
+    Feature& get(const char* name) {
+        for (auto& f : features) if (strcmp(f.name, name) == 0) return f;
+        static Feature empty = {nullptr, false, 0, 0, 0, 0, nullptr, 0, 0};
+        return empty;
+    }
 };
 
 // ==================== Globals ====================
@@ -153,33 +152,211 @@ static bool g_FabDragging = false;
 static float g_FabOffX, g_FabOffY, g_FabStartX, g_FabStartY;
 static bool g_FabMoved = false;
 
+// ==================== WorldToScreen ====================
+// Camera matrices for WorldToScreen projection
+static float g_VP[16] = {};
+static bool g_HasVP = false;
+
+struct Vec3 { float x, y, z; };
+
+static bool WorldToScreen(const Vec3& world, float& sx, float& sy) {
+    if (!g_HasVP) return false;
+
+    // View-Projection transform
+    float clipX = g_VP[0]*world.x + g_VP[4]*world.y + g_VP[8]*world.z + g_VP[12];
+    float clipY = g_VP[1]*world.x + g_VP[5]*world.y + g_VP[9]*world.z + g_VP[13];
+    float clipW = g_VP[3]*world.x + g_VP[7]*world.y + g_VP[11]*world.z + g_VP[15];
+
+    if (clipW < 0.01f) return false;
+
+    float ndcX = clipX / clipW;
+    float ndcY = clipY / clipW;
+
+    sx = (g_ScreenW * 0.5f) + (ndcX * g_ScreenW * 0.5f);
+    sy = (g_ScreenH * 0.5f) - (ndcY * g_ScreenH * 0.5f);
+
+    return true;
+}
+
+// ==================== Camera Helper ====================
+// Find Camera.main via Unity IL2CPP
+static void* g_MainCamera = nullptr;
+
+static void updateCamera() {
+    auto& gd = GameData::getInstance();
+    if (!gd.initialized) return;
+
+    // Try to get camera from GameController
+    if (gd.game_controller) {
+        void* cam = getFieldPtr(gd.game_controller, GameOffsets::GameController::MAIN_CAMERA);
+        if (cam) {
+            g_MainCamera = cam;
+            return;
+        }
+    }
+
+    // Try to get camera from local player's PlayerMainCamera
+    if (gd.local_player) {
+        void* pmc = getFieldPtr(gd.local_player, GameOffsets::PlayerController::PLAYER_MAIN_CAMERA);
+        if (pmc) {
+            void* cam = getFieldPtr(pmc, GameOffsets::PlayerMainCamera::CAMERA);
+            if (cam) {
+                g_MainCamera = cam;
+                return;
+            }
+        }
+    }
+}
+
 // ==================== Floating Button ====================
 void DrawFab(ImDrawList* dl) {
     ImVec2 center(g_FabX + FAB_SIZE * 0.5f, g_FabY + FAB_SIZE * 0.5f);
     float r = FAB_SIZE * 0.5f;
 
-    // Glow
     for (int i = 3; i > 0; i--) {
         float gr = r + i * 5.0f;
         float alpha = 30.0f / i;
         dl->AddCircleFilled(center, gr, IM_COL32(88, 166, 255, (int)alpha), 32);
     }
 
-    // Shadow
     dl->AddCircleFilled(ImVec2(center.x + 2, center.y + 3), r + 1, IM_COL32(0, 0, 0, 60), 32);
 
-    // BG
     ImU32 bg = g_ShowMenu ? IM_COL32(248, 81, 73, 230) : IM_COL32(31, 111, 235, 230);
     dl->AddCircleFilled(center, r, bg, 32);
 
-    // Border
     ImU32 border = g_ShowMenu ? IM_COL32(255, 123, 114, 255) : IM_COL32(100, 180, 255, 255);
     dl->AddCircle(center, r, border, 32, 2.5f);
 
-    // Icon
     const char* txt = g_ShowMenu ? "X" : "S2";
     ImVec2 ts = ImGui::CalcTextSize(txt);
     dl->AddText(ImVec2(center.x - ts.x * 0.5f, center.y - ts.y * 0.5f + 1), IM_COL32(255,255,255,255), txt);
+}
+
+// ==================== ESP Drawing ====================
+struct PlayerESP {
+    bool valid = false;
+    float screenX = 0, screenY = 0;
+    float headScreenX = 0, headScreenY = 0;
+    float boxW = 0, boxH = 0;
+    int health = 100;
+    int maxHealth = 100;
+    float distance = 0;
+    int team = 0;
+    bool isAlive = true;
+    char name[64] = {};
+    char weapon[64] = {};
+};
+
+static std::vector<PlayerESP> g_Players;
+
+void DrawESP(ImDrawList* dl) {
+    auto& fm = FeatureManager::getInstance();
+    bool anyESP = fm.get("Box ESP").enabled || fm.get("Snaplines ESP").enabled ||
+                  fm.get("Health Bar").enabled || fm.get("Name ESP").enabled ||
+                  fm.get("Distance ESP").enabled || fm.get("Head Dot").enabled;
+    if (!anyESP) return;
+
+    for (auto& p : g_Players) {
+        if (!p.valid) continue;
+        if (p.screenX <= 0 || p.screenY <= 0) continue;
+        if (p.screenX >= g_ScreenW || p.screenY >= g_ScreenH) continue;
+
+        ImU32 boxColor = (p.team == 1) ? IM_COL32(0, 120, 255, 255) : IM_COL32(255, 60, 60, 255);
+        ImU32 textShadow = IM_COL32(0, 0, 0, 200);
+
+        // Box ESP
+        if (fm.get("Box ESP").enabled) {
+            float halfW = p.boxW * 0.5f;
+            float topY = p.headScreenY;
+            float botY = p.screenY;
+            dl->AddRect(ImVec2(p.screenX - halfW - 1, topY - 1),
+                       ImVec2(p.screenX + halfW + 1, botY + 1),
+                       IM_COL32(0, 0, 0, 150), 0, 0, 1.5f);
+            dl->AddRect(ImVec2(p.screenX - halfW, topY),
+                       ImVec2(p.screenX + halfW, botY),
+                       boxColor, 0, 0, 1.0f);
+        }
+
+        // Head Dot
+        if (fm.get("Head Dot").enabled) {
+            dl->AddCircleFilled(ImVec2(p.headScreenX, p.headScreenY), 4, boxColor, 12);
+        }
+
+        // Snaplines
+        if (fm.get("Snaplines ESP").enabled) {
+            dl->AddLine(ImVec2(g_ScreenW * 0.5f, g_ScreenH),
+                       ImVec2(p.screenX, p.screenY),
+                       IM_COL32(255, 255, 255, 60), 1.0f);
+        }
+
+        // Health Bar
+        if (fm.get("Health Bar").enabled && p.maxHealth > 0) {
+            float hp = (float)p.health / (float)p.maxHealth;
+            if (hp < 0) hp = 0;
+            if (hp > 1) hp = 1;
+            float barH = p.boxH;
+            float barW = 3;
+            float x = p.screenX - p.boxW * 0.5f - 6;
+            float y = p.screenY;
+
+            dl->AddRectFilled(ImVec2(x - 1, y - 1), ImVec2(x + barW + 1, y + barH + 1),
+                             IM_COL32(0, 0, 0, 150), 1);
+            dl->AddRectFilled(ImVec2(x, y + barH * (1 - hp)),
+                             ImVec2(x + barW, y + barH),
+                             IM_COL32((int)(255 * (1-hp)), (int)(255 * hp), 0, 255), 1);
+        }
+
+        // Name
+        if (fm.get("Name ESP").enabled && p.name[0]) {
+            ImVec2 ts = ImGui::CalcTextSize(p.name);
+            dl->AddText(ImVec2(p.screenX - ts.x * 0.5f, p.screenY - p.boxH - 18),
+                       textShadow, p.name);
+            dl->AddText(ImVec2(p.screenX - ts.x * 0.5f + 1, p.screenY - p.boxH - 17),
+                       IM_COL32(255, 255, 255, 220), p.name);
+        }
+
+        // Distance
+        if (fm.get("Distance ESP").enabled && p.distance > 0) {
+            char dist[32];
+            snprintf(dist, sizeof(dist), "%.0fm", p.distance);
+            ImVec2 ts = ImGui::CalcTextSize(dist);
+            dl->AddText(ImVec2(p.screenX - ts.x * 0.5f, p.screenY + 4),
+                       IM_COL32(255, 255, 255, 180), dist);
+        }
+    }
+}
+
+// ==================== Crosshair ====================
+void DrawCrosshair(ImDrawList* dl) {
+    auto& fm = FeatureManager::getInstance();
+    if (!fm.get("Crosshair").enabled) return;
+
+    float cx = g_ScreenW * 0.5f;
+    float cy = g_ScreenH * 0.5f;
+    float size = 12;
+    float gap = 4;
+    ImU32 col = IM_COL32(255, 255, 255, 200);
+    float thick = 2.0f;
+
+    int style = fm.get("Crosshair").selectedItem;
+    switch (style) {
+        case 0: // Dot
+            dl->AddCircleFilled(ImVec2(cx, cy), 3, col, 12);
+            break;
+        case 1: // Cross
+            dl->AddLine(ImVec2(cx - size, cy), ImVec2(cx - gap, cy), col, thick);
+            dl->AddLine(ImVec2(cx + gap, cy), ImVec2(cx + size, cy), col, thick);
+            dl->AddLine(ImVec2(cx, cy - size), ImVec2(cx, cy - gap), col, thick);
+            dl->AddLine(ImVec2(cx, cy + gap), ImVec2(cx, cy + size), col, thick);
+            break;
+        case 2: // Circle
+            dl->AddCircle(ImVec2(cx, cy), size, col, 24, thick);
+            break;
+        case 3: // Triangle
+            dl->AddTriangle(ImVec2(cx, cy - size), ImVec2(cx - size, cy + size),
+                           ImVec2(cx + size, cy + size), col, thick);
+            break;
+    }
 }
 
 // ==================== ImGui Menu ====================
@@ -242,7 +419,7 @@ void DrawMenu() {
     ImGui::SetCursorPosX(14); ImGui::SetCursorPosY(10);
     ImGui::TextColored(accent, "S2"); ImGui::SameLine();
     ImGui::TextColored(text, "Mod Menu"); ImGui::SameLine(ImGui::GetContentRegionAvail().x - 30);
-    ImGui::TextColored(dim, "v2.0");
+    ImGui::TextColored(dim, "v3.0");
     ImGui::SetCursorPosY(46);
 
     ImGui::SetCursorPosX(8);
@@ -328,7 +505,6 @@ void DrawMenu() {
 static void process_touch(float x, float y, bool down, bool downFrame, bool upFrame) {
     ImGuiIO& io = ImGui::GetIO();
 
-    // FAB hit test
     float dx = x - (g_FabX + FAB_SIZE * 0.5f);
     float dy = y - (g_FabY + FAB_SIZE * 0.5f);
     float dist = sqrtf(dx*dx + dy*dy);
@@ -355,10 +531,29 @@ static void process_touch(float x, float y, bool down, bool downFrame, bool upFr
         return;
     }
 
-    // Forward to ImGui
+    if (!g_ShowMenu) return;
+
     io.MousePos = ImVec2(x, y);
     if (downFrame) io.MouseDown[0] = true;
     if (upFrame) io.MouseDown[0] = false;
+}
+
+// ==================== Game Update (called from hook) ====================
+static void updateGameFrame() {
+    auto& gd = GameData::getInstance();
+    if (!gd.initialized) return;
+
+    gd.update();
+    updateCamera();
+
+    // Update VP matrix from camera if available
+    // TODO: Read Camera.worldToCameraMatrix and Camera.projectionMatrix
+    // For now, use identity projection
+    g_HasVP = (g_MainCamera != nullptr);
+
+    // Scan for player objects in the scene
+    // TODO: Walk scene hierarchy to find CharacterPlayer objects
+    g_Players.clear();
 }
 
 // ==================== eglSwapBuffers Hook ====================
@@ -386,6 +581,12 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
         ImGui_ImplOpenGL3_Init("#version 300 es");
         g_ImGuiInited = true;
         LOGI("ImGui init: %dx%d", w, h);
+
+        // Init game data
+        std::thread([]() {
+            usleep(2000000);
+            GameData::getInstance().init();
+        }).detach();
     }
 
     // Save GL state
@@ -399,6 +600,9 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
     GLboolean last_depth = glIsEnabled(GL_DEPTH_TEST);
     GLboolean last_blend = glIsEnabled(GL_BLEND);
     GLboolean last_scissor_test = glIsEnabled(GL_SCISSOR_TEST);
+
+    // Update game data
+    updateGameFrame();
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplAndroid_NewFrame();
@@ -414,6 +618,8 @@ EGLBoolean hook_eglSwapBuffers(EGLDisplay dpy, EGLSurface surf) {
 
     ImDrawList* bg = ImGui::GetBackgroundDrawList();
     DrawFab(bg);
+    DrawESP(bg);
+    DrawCrosshair(bg);
     DrawMenu();
 
     ImGui::Render();
@@ -468,7 +674,6 @@ void hook_InputConsumer(void* thiz, void* a2, void* a3) {
 
 // ==================== Hook Setup ====================
 static void initHooks() {
-    // Wait for libEGL.so
     for (int i = 0; i < 50; i++) {
         if (dlopen("libEGL.so", RTLD_LAZY | RTLD_NOLOAD)) break;
         usleep(100000);
@@ -481,22 +686,18 @@ static void initHooks() {
     if (!sym) { LOGE("No eglSwapBuffers"); return; }
     LOGI("eglSwapBuffers: %p", sym);
 
-    // Hook eglSwapBuffers
-    if (!make_writable(sym, 16)) { LOGE("mprotect failed"); return; }
+    if (!make_writable(sym, 16)) { LOGE("mprotect failed for eglSwapBuffers"); return; }
 
     void* tramp = alloc_exec_mem(4096);
     if (tramp == MAP_FAILED) { LOGE("mmap failed"); return; }
 
-    // Copy original instructions
     memcpy(tramp, sym, 16);
 
-    // Write back-jump at tramp+16: jump to sym+16
     uint64_t backDest = (uint64_t)((uint8_t*)sym + 16);
     arm64_patch_jump((uint32_t*)tramp + 4, backDest);
 
     o_eglSwapBuffers = (eglSwapBuffers_t)tramp;
 
-    // Patch sym to jump to hook_eglSwapBuffers
     arm64_patch_jump((uint32_t*)sym, (uint64_t)hook_eglSwapBuffers);
     __builtin___clear_cache((char*)sym, (char*)sym + 16);
 
@@ -528,7 +729,7 @@ static void initHooks() {
 extern "C" {
 
 void loadJNI(JavaVM* vm) {
-    LOGI("loadJNI");
+    LOGI("loadJNI v3.0");
     FeatureManager::getInstance().init();
     std::thread([]() {
         usleep(3000000);
