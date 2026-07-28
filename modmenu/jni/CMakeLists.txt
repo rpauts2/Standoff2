@@ -22,23 +22,23 @@ add_library(Loader SHARED
 target_link_libraries(Loader log dl)
 
 # ==================== Main Library ====================
-add_library(Main SHARED
+add_library(ModMenu SHARED
     ${CMAKE_SOURCE_DIR}/main/Main.cpp
     ${IMGUI_SOURCES}
 )
 
-target_include_directories(Main PRIVATE
+target_include_directories(ModMenu PRIVATE
     ${IMGUI_DIR}
     ${IMGUI_DIR}/backends
 )
 
-target_compile_definitions(Main PRIVATE
+target_compile_definitions(ModMenu PRIVATE
     IMGUI_IMPL_OPENGL_ES3
     __ANDROID__
     ANDROID
 )
 
-target_compile_options(Main PRIVATE
+target_compile_options(ModMenu PRIVATE
     -O2
     -fno-exceptions
     -fno-rtti
@@ -48,7 +48,7 @@ target_compile_options(Main PRIVATE
     -fvisibility-inlines-hidden
 )
 
-target_link_libraries(Main
+target_link_libraries(ModMenu
     log
     android
     EGL

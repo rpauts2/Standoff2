@@ -24,7 +24,7 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void* reserved) {
     std::thread([vm]() {
         usleep(2000000);
 
-        void* handle = dlopen("libMain.so", RTLD_LAZY);
+        void* handle = dlopen("libModMenu.so", RTLD_LAZY);
         if (!handle) {
             LOGE("dlopen libMain.so failed: %s", dlerror());
             return;
