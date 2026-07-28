@@ -16,7 +16,7 @@ extern float g_ScreenW, g_ScreenH;
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-// ==================== Unity IL2CPP Types ====================
+// ==================== IL2CPP Forward Declarations ====================
 struct Il2CppImage;
 struct Il2CppAssembly;
 struct Il2CppDomain;
@@ -24,7 +24,6 @@ struct Il2CppClass;
 struct Il2CppObject;
 struct Il2CppFieldInfo;
 struct Il2CppMethodInfo;
-struct Il2CppString;
 struct Il2CppType;
 
 struct Il2CppFieldInfo {
@@ -72,200 +71,96 @@ struct Il2CppType {
 // ==================== IL2CPP API ====================
 struct IL2CPP_API {
     void* lib = nullptr;
-
     Il2CppDomain* (*domain_get)() = nullptr;
     void (*domain_get_assemblies)(const Il2CppDomain*, void**, uint32_t*) = nullptr;
     const Il2CppImage* (*assembly_get_image)(const Il2CppAssembly*) = nullptr;
     const char* (*image_get_name)(const Il2CppImage*) = nullptr;
-
     Il2CppClass* (*class_from_name)(const Il2CppImage*, const char*, const char*) = nullptr;
     Il2CppFieldInfo* (*class_get_field_from_name)(Il2CppClass*, const char*) = nullptr;
     int (*field_get_offset)(const Il2CppFieldInfo*) = nullptr;
-    const Il2CppType* (*field_get_type)(const Il2CppFieldInfo*) = nullptr;
-
     Il2CppMethodInfo* (*class_get_method_from_name)(Il2CppClass*, const char*, int) = nullptr;
-    void (*class_get_methods)(Il2CppClass*, void**) = nullptr;
-
     void* (*class_get_static_field_data)(Il2CppClass*) = nullptr;
-
-    void (*object_field_get_value)(Il2CppObject*, const Il2CppFieldInfo*, void*) = nullptr;
-    void (*object_field_set_value)(Il2CppObject*, const Il2CppFieldInfo*, void*) = nullptr;
-    Il2CppObject* (*object_new)(Il2CppClass*) = nullptr;
-    void* (*object_unbox)(Il2CppObject*) = nullptr;
-
-    const Il2CppType* (*class_get_type)(Il2CppClass*) = nullptr;
-    int (*class_get_type_token)(Il2CppClass*) = nullptr;
-
-    Il2CppClass* (*class_get_element_class)(Il2CppClass*) = nullptr;
-    int (*class_array_element_size)(Il2CppClass*) = nullptr;
-
-    const Il2CppType* (*method_get_return_type)(const Il2CppMethodInfo*) = nullptr;
-    uint32_t (*method_get_flags)(const Il2CppMethodInfo*, uint32_t*) = nullptr;
-
     bool loaded = false;
 };
 
 static IL2CPP_API il2cpp;
 
-// ==================== IL2CPP Init ====================
 static bool initIL2CPP() {
     if (il2cpp.loaded) return true;
-
     il2cpp.lib = dlopen("libil2cpp.so", RTLD_LAZY | RTLD_NOLOAD);
-    if (!il2cpp.lib) { LOGE("libil2cpp.so not found"); return false; }
-
-    #define LOAD(name) il2cpp.name = (decltype(il2cpp.name))dlsym(il2cpp.lib, "il2cpp_" #name)
-    LOAD(domain_get);
-    LOAD(domain_get_assemblies);
-    LOAD(assembly_get_image);
-    LOAD(image_get_name);
-    LOAD(class_from_name);
-    LOAD(class_get_field_from_name);
-    LOAD(field_get_offset);
-    LOAD(field_get_type);
-    LOAD(class_get_method_from_name);
-    LOAD(class_get_methods);
-    LOAD(class_get_static_field_data);
-    LOAD(object_field_get_value);
-    LOAD(object_field_set_value);
-    LOAD(object_new);
-    LOAD(object_unbox);
-    LOAD(class_get_type);
-    LOAD(class_get_type_token);
-    LOAD(class_get_element_class);
-    LOAD(class_array_element_size);
-    LOAD(method_get_return_type);
-    LOAD(method_get_flags);
-    #undef LOAD
-
-    if (!il2cpp.domain_get || !il2cpp.class_from_name) {
-        LOGE("Failed to load IL2CPP API");
-        return false;
-    }
-
+    if (!il2cpp.lib) { LOGE("No libil2cpp.so"); return false; }
+    #define L(name) il2cpp.name = (decltype(il2cpp.name))dlsym(il2cpp.lib, "il2cpp_" #name)
+    L(domain_get); L(domain_get_assemblies); L(assembly_get_image); L(image_get_name);
+    L(class_from_name); L(class_get_field_from_name); L(field_get_offset);
+    L(class_get_method_from_name); L(class_get_static_field_data);
+    #undef L
+    if (!il2cpp.domain_get || !il2cpp.class_from_name) { LOGE("IL2CPP API incomplete"); return false; }
     il2cpp.loaded = true;
-    LOGI("IL2CPP API loaded from %p", il2cpp.lib);
+    LOGI("IL2CPP loaded: %p", il2cpp.lib);
     return true;
 }
 
 // ==================== IL2CPP Helpers ====================
-static Il2CppClass* findClass(const char* img_pattern, const char* ns, const char* name) {
-    const Il2CppDomain* domain = il2cpp.domain_get();
-    if (!domain) return nullptr;
-
-    void* assemblies[128];
-    uint32_t count = 0;
-    il2cpp.domain_get_assemblies(domain, assemblies, &count);
-
-    for (uint32_t i = 0; i < count; i++) {
-        const Il2CppImage* img = il2cpp.assembly_get_image((const Il2CppAssembly*)assemblies[i]);
-        if (!img) continue;
-        const char* img_name = il2cpp.image_get_name(img);
-        if (!img_name) continue;
-        if (strstr(img_name, img_pattern)) {
-            Il2CppClass* k = il2cpp.class_from_name(img, ns, name);
+static Il2CppClass* findClass(const char* img, const char* ns, const char* name) {
+    const Il2CppDomain* d = il2cpp.domain_get();
+    if (!d) return nullptr;
+    void* asms[128]; uint32_t cnt = 0;
+    il2cpp.domain_get_assemblies(d, asms, &cnt);
+    for (uint32_t i = 0; i < cnt; i++) {
+        const Il2CppImage* im = il2cpp.assembly_get_image((const Il2CppAssembly*)asms[i]);
+        if (!im) continue;
+        const char* n = il2cpp.image_get_name(im);
+        if (n && strstr(n, img)) {
+            Il2CppClass* k = il2cpp.class_from_name(im, ns, name);
             if (k) return k;
         }
     }
     return nullptr;
 }
 
-static int getFieldOff(Il2CppClass* k, const char* name) {
+static int getFieldOff(Il2CppClass* k, const char* n) {
     if (!k) return -1;
-    Il2CppFieldInfo* f = il2cpp.class_get_field_from_name(k, name);
+    Il2CppFieldInfo* f = il2cpp.class_get_field_from_name(k, n);
     if (!f) return -1;
     return il2cpp.field_get_offset ? il2cpp.field_get_offset(f) : f->offset;
 }
 
-static Il2CppMethodInfo* getMethod(Il2CppClass* k, const char* name, int params = 0) {
-    if (!k) return nullptr;
-    return il2cpp.class_get_method_from_name(k, name, params);
+static Il2CppMethodInfo* getMethod(Il2CppClass* k, const char* n, int p = 0) {
+    return k ? il2cpp.class_get_method_from_name(k, n, p) : nullptr;
 }
 
-static void* getPtr(void* obj, int off) {
-    if (!obj || off < 0) return nullptr;
-    return *(void**)((uint8_t*)obj + off);
-}
-
-static bool getBool(void* obj, int off) {
-    if (!obj || off < 0) return false;
-    return *(bool*)((uint8_t*)obj + off);
-}
-
-static int getInt(void* obj, int off) {
-    if (!obj || off < 0) return 0;
-    return *(int*)((uint8_t*)obj + off);
-}
-
-static float getFloat(void* obj, int off) {
-    if (!obj || off < 0) return 0.0f;
-    return *(float*)((uint8_t*)obj + off);
-}
-
-static void setFloat(void* obj, int off, float v) {
-    if (!obj || off < 0) return;
-    *(float*)((uint8_t*)obj + off) = v;
-}
-
-static void setInt(void* obj, int off, int v) {
-    if (!obj || off < 0) return;
-    *(int*)((uint8_t*)obj + off) = v;
-}
+static void* getPtr(void* o, int off) { return (o && off >= 0) ? *(void**)((uint8_t*)o + off) : nullptr; }
+static bool getBool(void* o, int off) { return (o && off >= 0) ? *(bool*)((uint8_t*)o + off) : false; }
+static int getInt(void* o, int off) { return (o && off >= 0) ? *(int*)((uint8_t*)o + off) : 0; }
+static float getFloat(void* o, int off) { return (o && off >= 0) ? *(float*)((uint8_t*)o + off) : 0.f; }
 
 // ==================== Unity Types in Memory ====================
-// Vector3 in IL2CPP: fields at 0x10 (x), 0x14 (y), 0x18 (z)
-struct MemVector3 {
-    void* klass_or_padding[2]; // IL2CPP header
-    float x, y, z;
-};
+struct MemVec3 { void* pad[2]; float x, y, z; };
+struct Mat4 { void* pad[2]; float m[16]; };
+struct ScreenPt { float x, y, z; };
 
-// Matrix4x4 in IL2CPP: 16 floats starting at 0x10
-struct MemMatrix4x4 {
-    void* klass_or_padding[2]; // IL2CPP header
-    float m[16]; // m00,m10,m20,m30,m01,m11,m21,m31,m02,m12,m22,m32,m03,m13,m23,m33
+// Il2CppArray layout: klass(8) + monitor(8) + max_length(4) + padding(4) + elements[]
+struct Il2CppArray {
+    void* klass;
+    void* monitor;
+    int32_t max_length;
+    uint32_t _padding;
+    void* elements[1]; // variable length
 };
-
-// ScreenPoint (Vector3 for screen coords)
-struct MemScreenPoint {
-    float x, y, z;
-};
-
-// ==================== Memory Scanner ====================
-static uintptr_t findLibBase(const char* lib) {
-    char line[512];
-    FILE* fp = fopen("/proc/self/maps", "r");
-    if (!fp) return 0;
-    uintptr_t base = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, lib) && strstr(line, "r-xp")) {
-            base = strtoul(line, nullptr, 16);
-            break;
-        }
-    }
-    fclose(fp);
-    return base;
-}
 
 // ==================== PlayerData ====================
 struct PlayerData {
-    void* obj = nullptr;           // CharacterPlayer* or PlayerController*
     void* playerController = nullptr;
+    void* characterPlayer = nullptr;
     bool valid = false;
     bool isLocal = false;
-
-    // Position
     float posX = 0, posY = 0, posZ = 0;
     float headX = 0, headY = 0, headZ = 0;
-
-    // Screen coords
     float screenX = 0, screenY = 0;
     float headScreenX = 0, headScreenY = 0;
     float boxW = 0, boxH = 0;
     bool onScreen = false;
-
-    // Game data
-    int health = 100;
-    int maxHealth = 100;
+    int health = 100, maxHealth = 100;
     int team = 0;
     bool isAlive = true;
     int actorId = -1;
@@ -277,429 +172,428 @@ struct PlayerData {
 // ==================== GameData ====================
 class GameData {
 public:
-    static GameData& getInstance() {
-        static GameData instance;
-        return instance;
-    }
-
+    static GameData& getInstance() { static GameData i; return i; }
     bool initialized = false;
-    uintptr_t il2cppBase = 0;
 
-    // Class pointers
-    Il2CppClass* cPlayerController = nullptr;
-    Il2CppClass* cPlayerManager = nullptr;
-    Il2CppClass* cGameController = nullptr;
-    Il2CppClass* cGameManager = nullptr;
-    Il2CppClass* cCharacterPlayer = nullptr;
-    Il2CppClass* cAimController = nullptr;
-    Il2CppClass* cMovementController = nullptr;
-    Il2CppClass* cWeaponryController = nullptr;
-    Il2CppClass* cWeaponController = nullptr;
-    Il2CppClass* cNetworkController = nullptr;
-    Il2CppClass* cPhotonNetwork = nullptr;
-    Il2CppClass* cCamera = nullptr;
-    Il2CppClass* cObject = nullptr;        // UnityEngine.Object
-    Il2CppClass* cGameObject = nullptr;
-    Il2CppClass* cTransform = nullptr;
-    Il2CppClass* cPlayerNameText = nullptr;
-    Il2CppClass* cPlayerCondition = nullptr;
+    // Classes
+    Il2CppClass *cPC = nullptr, *cPM = nullptr, *cGC = nullptr, *cGM = nullptr;
+    Il2CppClass *cCharP = nullptr, *cAim = nullptr, *cMove = nullptr;
+    Il2CppClass *cWeapCtrl = nullptr, *cWeapon = nullptr, *cNet = nullptr;
+    Il2CppClass *cPN = nullptr, *cNetPeer = nullptr, *cPP = nullptr;
+    Il2CppClass *cCam = nullptr, *cObj = nullptr, *cTrans = nullptr;
+    Il2CppClass *cWeaponParams = nullptr;
 
-    // Field offsets (resolved at runtime)
-    int fo_localPlayer = -1;
-    int fo_aimCtrl = -1;
-    int fo_moveCtrl = -1;
-    int fo_weaponry = -1;
-    int fo_networkCtrl = -1;
-    int fo_mainCamera = -1;
-    int fo_bodyTransform = -1;
-    int fo_team = -1;
-    int fo_alive = -1;
-    int fo_alive2 = -1;
-    int fo_health = -1;
-    int fo_photonView = -1;
-    int fo_actorId = -1;
-    int fo_maxCtHealth = -1;
-    int fo_maxTrHealth = -1;
-    int fo_playerCharView = -1;
-    int fo_charPlayer = -1; // CharacterPlayer -> PlayerController
-    int fo_weaponCtrl = -1; // WeaponryController -> current weapon
-    int fo_weaponParams = -1; // WeaponController -> weapon params
-    int fo_displayName = -1; // WeaponParameters._displayName
+    // Field offsets - PlayerController
+    int pc_aim = -1, pc_move = -1, pc_weap = -1, pc_net = -1;
+    int pc_cam = -1, pc_transform = -1, pc_team = -1;
+    int pc_alive = -1, pc_alive2 = -1, pc_health = -1;
+    int pc_photonView = -1, pc_actorId = -1;
+    int pc_maxCT = -1, pc_maxTR = -1;
+    int pc_charView = -1;
 
-    // Method pointers
-    Il2CppMethodInfo* mWorldToScreen = nullptr;
-    Il2CppMethodInfo* mFindObjectsOfType = nullptr;
-    Il2CppMethodInfo* mGetMain = nullptr;
-    Il2CppMethodInfo* mGetPosition = nullptr;
-    Il2CppMethodInfo* mGetForward = nullptr;
-    Il2CppMethodInfo* mGetEulerAngles = nullptr;
-    Il2CppMethodInfo* mSetEulerAngles = nullptr;
-    Il2CppMethodInfo* mGetComponent = nullptr;
-    Il2CppMethodInfo* mGetWorldToCameraMatrix = nullptr;
-    Il2CppMethodInfo* mGetProjectionMatrix = nullptr;
-    Il2CppMethodInfo* mGetName = nullptr;
-    Il2CppMethodInfo* mGetPlayerList = nullptr;
+    // Field offsets - NetworkingPeer
+    int np_localPlayer = -1;
+    int np_mActors = -1;
+    int np_mPlayerListCopy = -1;
+    int np_mOtherPlayerListCopy = -1;
 
-    // Game state
-    void* localPlayer = nullptr;
+    // Field offsets - PhotonPlayer
+    int pp_actorID = -1;
+    int pp_nameField = -1;
+    int pp_isLocal = -1;
+
+    // Field offsets - CharacterPlayer
+    int cp_playerController = -1;
+
+    // Field offsets - WeaponryController
+    int wc_weaponCtrl = -1;
+
+    // Field offsets - WeaponController
+    int wpc_params = -1;
+
+    // Field offsets - WeaponParameters
+    int wp_displayName = -1;
+
+    // Field offsets - PlayerManager
+    int pm_localPlayer = -1;
+
+    // Methods
+    Il2CppMethodInfo *mW2S = nullptr, *mMain = nullptr;
+    Il2CppMethodInfo *mPos = nullptr, *mEuler = nullptr, *mSetEuler = nullptr;
+    Il2CppMethodInfo *mW2CMat = nullptr, *mProjMat = nullptr;
+    Il2CppMethodInfo *mGetPlayerList = nullptr;
+
+    // State
     void* localController = nullptr;
     void* mainCamera = nullptr;
-    MemMatrix4x4 worldToCameraMatrix = {};
-    MemMatrix4x4 projectionMatrix = {};
-    bool hasMatrices = false;
-
+    Mat4 w2cMat = {}, projMat = {};
+    bool hasMat = false;
     std::vector<PlayerData> players;
 
     void init() {
         if (initialized) return;
-
-        il2cppBase = findLibBase("libil2cpp.so");
-        if (!il2cppBase) { LOGE("No libil2cpp.so"); return; }
-        LOGI("libil2cpp.so: 0x%lx", il2cppBase);
-
         if (!initIL2CPP()) return;
 
-        // Find all classes
-        auto fc = [](const char* img, const char* ns, const char* n) -> Il2CppClass* {
-            return findClass(img, ns, n);
-        };
+        // Find classes
+        auto fc = [](const char* i, const char* n, const char* c) { return findClass(i, n, c); };
+        cPC = fc("Assembly-CSharp","Axlebolt.Standoff.Player","PlayerController");
+        cPM = fc("Assembly-CSharp","Axlebolt.Standoff.Player","PlayerManager");
+        cGC = fc("Assembly-CSharp","Axlebolt.Standoff.Game","GameController");
+        cGM = fc("Assembly-CSharp","Axlebolt.Standoff.Game","GameManager");
+        cCharP = fc("Assembly-CSharp","Axlebolt.Standoff.Networking","CharacterPlayer");
+        cAim = fc("Assembly-CSharp","Axlebolt.Standoff.Player","AimController");
+        cMove = fc("Assembly-CSharp","Axlebolt.Standoff.Player","MovementController");
+        cWeapCtrl = fc("Assembly-CSharp","Axlebolt.Standoff.Inventory","WeaponryController");
+        cWeapon = fc("Assembly-CSharp","Axlebolt.Standoff.Inventory","WeaponController");
+        cNet = fc("Assembly-CSharp","Axlebolt.Standoff.Player","NetworkController");
+        cPN = fc("PhotonUnityNetworking","Photon.Pun","PhotonNetwork");
+        cNetPeer = fc("PhotonUnityNetworking","Photon.Pun","NetworkingPeer");
+        cPP = fc("PhotonUnityNetworking","ExitGames.Client.Photon","PhotonPlayer");
+        cCam = fc("UnityEngine.CoreModule","UnityEngine","Camera");
+        cObj = fc("UnityEngine.CoreModule","UnityEngine","Object");
+        cTrans = fc("UnityEngine.CoreModule","UnityEngine","Transform");
+        cWeaponParams = fc("Assembly-CSharp","Axlebolt.Standoff.Inventory","WeaponParameters");
 
-        cPlayerController = fc("Assembly-CSharp", "Axlebolt.Standoff.Player", "PlayerController");
-        cPlayerManager = fc("Assembly-CSharp", "Axlebolt.Standoff.Player", "PlayerManager");
-        cGameController = fc("Assembly-CSharp", "Axlebolt.Standoff.Game", "GameController");
-        cGameManager = fc("Assembly-CSharp", "Axlebolt.Standoff.Game", "GameManager");
-        cCharacterPlayer = fc("Assembly-CSharp", "Axlebolt.Standoff.Networking", "CharacterPlayer");
-        cAimController = fc("Assembly-CSharp", "Axlebolt.Standoff.Player", "AimController");
-        cMovementController = fc("Assembly-CSharp", "Axlebolt.Standoff.Player", "MovementController");
-        cWeaponryController = fc("Assembly-CSharp", "Axlebolt.Standoff.Inventory", "WeaponryController");
-        cWeaponController = fc("Assembly-CSharp", "Axlebolt.Standoff.Inventory", "WeaponController");
-        cNetworkController = fc("Assembly-CSharp", "Axlebolt.Standoff.Player", "NetworkController");
-        cPhotonNetwork = fc("PhotonUnityNetworking", "Photon.Pun", "PhotonNetwork");
-        cCamera = fc("UnityEngine.CoreModule", "UnityEngine", "Camera");
-        cObject = fc("UnityEngine.CoreModule", "UnityEngine", "Object");
-        cGameObject = fc("UnityEngine.CoreModule", "UnityEngine", "GameObject");
-        cTransform = fc("UnityEngine.CoreModule", "UnityEngine", "Transform");
-        cPlayerCondition = fc("Assembly-CSharp", "Axlebolt.Standoff.Missions.Configuration", "PlayerCondition");
+        // Fallbacks
+        if (!cPC) cPC = fc("Assembly-CSharp","","PlayerController");
+        if (!cPM) cPM = fc("Assembly-CSharp","","PlayerManager");
+        if (!cCharP) cCharP = fc("Assembly-CSharp","","CharacterPlayer");
+        if (!cPN) cPN = fc("PhotonUnityNetworking","","PhotonNetwork");
+        if (!cNetPeer) cNetPeer = fc("PhotonUnityNetworking","","NetworkingPeer");
+        if (!cPP) cPP = fc("PhotonUnityNetworking","","PhotonPlayer");
 
-        // Fallback class search
-        if (!cPlayerController) cPlayerController = fc("Assembly-CSharp", "", "PlayerController");
-        if (!cPlayerManager) cPlayerManager = fc("Assembly-CSharp", "", "PlayerManager");
-        if (!cCharacterPlayer) cCharacterPlayer = fc("Assembly-CSharp", "", "CharacterPlayer");
-        if (!cCamera) cCamera = fc("UnityEngine.dll", "UnityEngine", "Camera");
+        LOGI("Classes: PC=%p PM=%p PN=%p NP=%p PP=%p Cam=%p", cPC, cPM, cPN, cNetPeer, cPP, cCam);
 
-        LOGI("Classes: PC=%p PM=%p GC=%p CharP=%p Cam=%p Obj=%p",
-             cPlayerController, cPlayerManager, cGameController, cCharacterPlayer, cCamera, cObject);
-
-        // Resolve field offsets from IL2CPP
+        // Resolve offsets
         auto fo = [&](Il2CppClass* k, const char* f) -> int {
-            if (!k) return -1;
             int o = getFieldOff(k, f);
-            if (o >= 0) LOGI("  %s::%s = 0x%x", "?", f, o);
+            if (o >= 0) LOGI("  %s = 0x%x", f, o);
             return o;
         };
 
-        // PlayerController fields
-        if (cPlayerController) {
-            fo_aimCtrl = fo(cPlayerController, "<DAFBHDCBBFDBDBD>k__BackingField");
-            fo_moveCtrl = fo(cPlayerController, "<DBHAFHFGGFGFECA>k__BackingField");
-            fo_weaponry = fo(cPlayerController, "<AECFFADGAGBBHHB>k__BackingField");
-            fo_networkCtrl = fo(cPlayerController, "<CEGFDEEGFGDBDBF>k__BackingField");
-            fo_mainCamera = fo(cPlayerController, "HDDBDFEHGCFFBEA");
-            fo_bodyTransform = fo(cPlayerController, "AEHBEAEHHDBAECC");
-            fo_team = fo(cPlayerController, "EAGCGEABDGFGBHC");
-            fo_alive = fo(cPlayerController, "EDBGBDAHEAEDFCC");
-            fo_alive2 = fo(cPlayerController, "<AFBHCBEGEDFFEBE>k__BackingField");
-            fo_health = fo(cPlayerController, "<AEDDGECCHCFBBCH>k__BackingField");
-            fo_photonView = fo(cPlayerController, "<HHCEEHGACEBEDFC>k__BackingField");
-            fo_actorId = fo(cPlayerController, "<FACDFFBDHEBHAFG>k__BackingField");
-            fo_maxCtHealth = fo(cPlayerController, "MaxCtHealth");
-            fo_maxTrHealth = fo(cPlayerController, "MaxTrHealth");
-            fo_playerCharView = fo(cPlayerController, "FHGACBBGHEEBEEA");
+        // PlayerController
+        if (cPC) {
+            pc_aim = fo(cPC,"<DAFBHDCBBFDBDBD>k__BackingField");
+            pc_move = fo(cPC,"<DBHAFHFGGFGFECA>k__BackingField");
+            pc_weap = fo(cPC,"<AECFFADGAGBBHHB>k__BackingField");
+            pc_net = fo(cPC,"<CEGFDEEGFGDBDBF>k__BackingField");
+            pc_cam = fo(cPC,"HDDBDFEHGCFFBEA");
+            pc_transform = fo(cPC,"AEHBEAEHHDBAECC");
+            pc_team = fo(cPC,"EAGCGEABDGFGBHC");
+            pc_alive = fo(cPC,"EDBGBDAHEAEDFCC");
+            pc_alive2 = fo(cPC,"<AFBHCBEGEDFFEBE>k__BackingField");
+            pc_health = fo(cPC,"<AEDDGECCHCFBBCH>k__BackingField");
+            pc_photonView = fo(cPC,"<HHCEEHGACEBEDFC>k__BackingField");
+            pc_actorId = fo(cPC,"<FACDFFBDHEBHAFG>k__BackingField");
+            pc_maxCT = fo(cPC,"MaxCtHealth");
+            pc_maxTR = fo(cPC,"MaxTrHealth");
         }
 
-        // CharacterPlayer fields
-        if (cCharacterPlayer) {
-            fo_charPlayer = fo(cCharacterPlayer, "DHGHGGFDECGFAEE");
-        }
+        // CharacterPlayer
+        if (cCharP) cp_playerController = fo(cCharP,"DHGHGGFDECGFAEE");
 
         // WeaponryController
-        if (cWeaponryController) {
-            fo_weaponCtrl = fo(cWeaponryController, "<GBCHHHGABFGDBFD>k__BackingField");
-        }
+        if (cWeapCtrl) wc_weaponCtrl = fo(cWeapCtrl,"<GBCHHHGABFGDBFD>k__BackingField");
+
+        // WeaponController
+        if (cWeapon) wpc_params = fo(cWeapon,"<BAFFFEGDBGEECDA>k__BackingField");
+
+        // WeaponParameters
+        if (cWeaponParams) wp_displayName = fo(cWeaponParams,"_displayName");
 
         // PlayerManager
-        if (cPlayerManager) {
-            fo_localPlayer = fo(cPlayerManager, "<CFCHCBFEEFHBAEH>k__BackingField");
+        if (cPM) pm_localPlayer = fo(cPM,"<CFCHCBFEEFHBAEH>k__BackingField");
+
+        // NetworkingPeer
+        if (cNetPeer) {
+            np_localPlayer = fo(cNetPeer,"<LocalPlayer>k__BackingField");
+            np_mActors = fo(cNetPeer,"mActors");
+            np_mPlayerListCopy = fo(cNetPeer,"mPlayerListCopy");
+            np_mOtherPlayerListCopy = fo(cNetPeer,"mOtherPlayerListCopy");
         }
 
-        // Resolve method pointers
-        if (cCamera) {
-            mWorldToScreen = getMethod(cCamera, "WorldToScreenPoint", 1);
-            mGetMain = getMethod(cCamera, "get_main", 0);
-            mGetWorldToCameraMatrix = getMethod(cCamera, "get_worldToCameraMatrix", 0);
-            mGetProjectionMatrix = getMethod(cCamera, "get_projectionMatrix", 0);
-            mGetPosition = getMethod(cCamera, "get_position", 0);
-            mGetEulerAngles = getMethod(cCamera, "get_eulerAngles", 0);
-            LOGI("Camera methods: W2S=%p main=%p w2cMat=%p projMat=%p",
-                 mWorldToScreen, mGetMain, mGetWorldToCameraMatrix, mGetProjectionMatrix);
-        }
-
-        if (cTransform) {
-            mGetPosition = getMethod(cTransform, "get_position", 0);
-            mGetForward = getMethod(cTransform, "get_forward", 0);
-            mGetEulerAngles = getMethod(cTransform, "get_eulerAngles", 0);
-            mSetEulerAngles = getMethod(cTransform, "set_eulerAngles", 1);
-            LOGI("Transform methods: pos=%p fwd=%p euler=%p setEuler=%p",
-                 mGetPosition, mGetForward, mGetEulerAngles, mSetEulerAngles);
-        }
-
-        // Object.FindObjectsOfType
-        if (cObject) {
-            mFindObjectsOfType = getMethod(cObject, "FindObjectsOfType", 1);
-            if (!mFindObjectsOfType)
-                mFindObjectsOfType = getMethod(cObject, "FindObjectsByType", 2);
-            LOGI("FindObjectsOfType: %p", mFindObjectsOfType);
+        // PhotonPlayer
+        if (cPP) {
+            pp_actorID = fo(cPP,"actorID");
+            pp_nameField = fo(cPP,"nameField");
+            pp_isLocal = fo(cPP,"IsLocal");
         }
 
         // PhotonNetwork
-        if (cPhotonNetwork) {
-            mGetPlayerList = getMethod(cPhotonNetwork, "get_playerList", 0);
+        if (cPN) {
+            mGetPlayerList = getMethod(cPN,"get_playerList",0);
             LOGI("PhotonNetwork.playerList: %p", mGetPlayerList);
         }
 
-        initialized = true;
-        LOGI("GameData initialized successfully");
+        // Methods
+        if (cCam) {
+            mW2S = getMethod(cCam,"WorldToScreenPoint",1);
+            mMain = getMethod(cCam,"get_main",0);
+            mW2CMat = getMethod(cCam,"get_worldToCameraMatrix",0);
+            mProjMat = getMethod(cCam,"get_projectionMatrix",0);
+            LOGI("Cam: W2S=%p main=%p w2c=%p proj=%p", mW2S, mMain, mW2CMat, mProjMat);
+        }
+        if (cTrans) {
+            mPos = getMethod(cTrans,"get_position",0);
+            mEuler = getMethod(cTrans,"get_eulerAngles",0);
+            mSetEuler = getMethod(cTrans,"set_eulerAngles",1);
+            LOGI("Trans: pos=%p euler=%p setEuler=%p", mPos, mEuler, mSetEuler);
+        }
 
-        // Get camera immediately
+        initialized = true;
+        LOGI("GameData initialized");
         updateCamera();
     }
 
     // ---- Camera ----
     void updateCamera() {
-        if (!cCamera || !mGetMain) return;
-
-        // Camera.main
-        void* camClass[2] = { (void*)cCamera, nullptr };
-        void* args[1] = { nullptr };
-
-        // IL2CPP static method call: invoke get_main
-        if (mGetMain->methodPointer) {
-            auto fn = (void* (*)())mGetMain->methodPointer;
-            mainCamera = fn();
-            if (mainCamera) {
-                LOGI("Camera.main = %p", mainCamera);
-                readCameraMatrices();
-            }
+        if (!mMain || !mMain->methodPointer) return;
+        mainCamera = ((void* (*)())mMain->methodPointer)();
+        if (mainCamera) {
+            LOGI("Camera.main: %p", mainCamera);
+            readCameraMatrices();
         }
     }
 
     void readCameraMatrices() {
         if (!mainCamera) return;
-
-        // Read worldToCameraMatrix
-        if (mGetWorldToCameraMatrix && mGetWorldToCameraMatrix->methodPointer) {
-            auto fn = (MemMatrix4x4 (*)(void*))mGetWorldToCameraMatrix->methodPointer;
-            worldToCameraMatrix = fn(mainCamera);
-        }
-
-        // Read projectionMatrix
-        if (mGetProjectionMatrix && mGetProjectionMatrix->methodPointer) {
-            auto fn = (MemMatrix4x4 (*)(void*))mGetProjectionMatrix->methodPointer;
-            projectionMatrix = fn(mainCamera);
-        }
-
-        hasMatrices = (worldToCameraMatrix.m[0] != 0 || worldToCameraMatrix.m[5] != 0);
+        if (mW2CMat && mW2CMat->methodPointer)
+            w2cMat = ((Mat4(*)(void*))mW2CMat->methodPointer)(mainCamera);
+        if (mProjMat && mProjMat->methodPointer)
+            projMat = ((Mat4(*)(void*))mProjMat->methodPointer)(mainCamera);
+        hasMat = (w2cMat.m[0] != 0 || w2cMat.m[5] != 0);
     }
 
-    // ---- WorldToScreen via Camera method ----
     bool worldToScreen(float wx, float wy, float wz, float& sx, float& sy) {
-        if (!mainCamera || !mWorldToScreen || !mWorldToScreen->methodPointer) return false;
-
-        // Camera.WorldToScreenPoint(Vector3 position)
-        // In IL2CPP: Vector3 is passed by value on stack
-        struct Vec3Arg { float x, y, z; };
-
-        Vec3Arg pos = { wx, wy, wz };
-        MemScreenPoint result = {};
-
-        auto fn = (MemScreenPoint (*)(void*, Vec3Arg))mWorldToScreen->methodPointer;
-        result = fn(mainCamera, pos);
-
-        if (result.z < 0) return false; // Behind camera
-
-        sx = result.x;
-        sy = result.y;
+        if (!mainCamera || !mW2S || !mW2S->methodPointer) return false;
+        struct V3 { float x,y,z; };
+        ScreenPt r = ((ScreenPt(*)(void*,V3))mW2S->methodPointer)(mainCamera, {wx,wy,wz});
+        if (r.z < 0) return false;
+        sx = r.x; sy = r.y;
         return true;
     }
 
-    // ---- Transform.GetPosition ----
-    bool getTransformPosition(void* transform, float& x, float& y, float& z) {
-        if (!transform || !mGetPosition || !mGetPosition->methodPointer) return false;
-
-        auto fn = (MemVector3 (*)(void*))mGetPosition->methodPointer;
-        MemVector3 pos = fn(transform);
-        x = pos.x; y = pos.y; z = pos.z;
+    bool getTransformPos(void* t, float& x, float& y, float& z) {
+        if (!t || !mPos || !mPos->methodPointer) return false;
+        MemVec3 p = ((MemVec3(*)(void*))mPos->methodPointer)(t);
+        x = p.x; y = p.y; z = p.z;
         return true;
     }
 
-    // ---- Transform.SetEulerAngles ----
-    void setTransformEulerAngles(void* transform, float x, float y, float z) {
-        if (!transform || !mSetEulerAngles || !mSetEulerAngles->methodPointer) return;
-        struct Vec3Arg { float x, y, z; };
-        auto fn = (void (*)(void*, Vec3Arg))mSetEulerAngles->methodPointer;
-        fn(transform, {x, y, z});
+    void setTransformEuler(void* t, float x, float y, float z) {
+        if (!t || !mSetEuler || !mSetEuler->methodPointer) return;
+        ((void(*)(void*,float,float,float))mSetEuler->methodPointer)(t, x, y, z);
+    }
+
+    // ---- Get NetworkingPeer instance ----
+    void* getNetworkingPeer() {
+        if (!cPN || !cNetPeer) return nullptr;
+
+        // PhotonNetwork is a static class; its instance fields live in static field data
+        void* sd = il2cpp.class_get_static_field_data ? il2cpp.class_get_static_field_data(cPN) : nullptr;
+        if (!sd) {
+            // Fallback: try to find via PhotonNetwork.networkingPeer field offset
+            int off = getFieldOff(cPN, "networkingPeer");
+            if (off < 0) {
+                // Scan all fields for NetworkingPeer type
+                // The field name might be obfuscated
+                // From dump.cs: networkingPeer is at offset 0x18 in the class
+                off = 0x18; // Known offset from dump.cs
+            }
+            return getPtr(nullptr, 0); // Need static data
+        }
+        return getPtr(sd, 0x18); // networkingPeer offset from dump.cs
+    }
+
+    // ---- Read PhotonPlayer array ----
+    std::vector<void*> readPhotonPlayerArray(void* arrayObj) {
+        std::vector<void*> result;
+        if (!arrayObj) return result;
+
+        Il2CppArray* arr = (Il2CppArray*)arrayObj;
+        int count = arr->max_length;
+        if (count <= 0 || count > 64) return result;
+
+        for (int i = 0; i < count; i++) {
+            void* elem = arr->elements[i];
+            if (elem) result.push_back(elem);
+        }
+        return result;
     }
 
     // ---- Local Player ----
     void updateLocalPlayer() {
-        localPlayer = nullptr;
         localController = nullptr;
 
-        if (!cPlayerManager || fo_localPlayer < 0) return;
+        // Method 1: PlayerManager static field
+        if (cPM && pm_localPlayer >= 0) {
+            void* sd = il2cpp.class_get_static_field_data ?
+                       il2cpp.class_get_static_field_data(cPM) : nullptr;
+            if (sd) localController = getPtr(sd, pm_localPlayer);
+        }
 
-        // Get static PlayerManager instance
-        void* staticData = il2cpp.class_get_static_field_data ?
-                           il2cpp.class_get_static_field_data(cPlayerManager) : nullptr;
-        if (!staticData) return;
+        // Method 2: NetworkingPeer.LocalPlayer
+        if (!localController && cNetPeer && np_localPlayer >= 0) {
+            void* peer = getNetworkingPeer();
+            if (peer) localController = getPtr(peer, np_localPlayer);
+        }
 
-        void* lp = getPtr(staticData, fo_localPlayer);
-        if (!lp) return;
-
-        localController = lp;
-        LOGI("Local player: %p", lp);
+        if (localController) LOGI("Local player: %p", localController);
     }
 
-    // ---- Scene Scan ----
+    // ---- Scene Scan via Photon ----
     void updatePlayers() {
         players.clear();
         if (!localController) return;
 
-        // Get local team
-        int localTeam = getInt(localController, fo_team);
+        int localTeam = getInt(localController, pc_team);
 
-        // Get local player transform for distance calc
-        void* localTransform = getPtr(localController, fo_bodyTransform);
+        // Get local position for distance calc
         float lpx = 0, lpy = 0, lpz = 0;
-        if (localTransform) getTransformPosition(localTransform, lpx, lpy, lpz);
+        void* lt = getPtr(localController, pc_transform);
+        if (lt) getTransformPos(lt, lpx, lpy, lpz);
 
-        // Try to find all PlayerController via CharacterPlayer
-        // CharacterPlayer has PlayerController at 0x50
-        // We'll scan the object list or use FindObjectsOfType
-
-        // Alternative: iterate PhotonView objects to find players
-        // For now, use a direct memory scan approach
-
-        // Scan for PlayerController objects by looking for CharacterPlayer components
-        // In Unity, we can use Object.FindObjectsOfType<CharacterPlayer>()
-        if (mFindObjectsOfType && mFindObjectsOfType->methodPointer && cCharacterPlayer) {
-            // FindObjectsOfType(Il2CppRuntimeType type, FindObjectsSortMode sortMode)
-            // We need the RuntimeType for CharacterPlayer
-            // This requires il2cpp_class_get_type and creating a RuntimeType
-
-            // Simplified: just iterate a known range
-            // Actually, let's try a different approach - read from known singleton locations
+        // Get NetworkingPeer
+        void* peer = getNetworkingPeer();
+        if (!peer) {
+            LOGI("No NetworkingPeer");
+            return;
         }
 
-        // Approach: iterate through the GameController's player list
-        // GameController at 0x2C0 has local PlayerController
-        // Or we can scan the scene hierarchy
-
-        // For now, let's find players through the PhotonView network
-        // We know PlayerController objects exist in memory - scan for them
-        // by reading the game's player array
-
-        // Simple approach: find CharacterPlayer objects by scanning libil2cpp metadata
-        // and then reading their PlayerController reference
-
-        // Most reliable: use the game's own player tracking
-        // PlayerManager stores local player, and the game has a list of all players
-        // Let's try to find the list through the GameManager
-
-        // We'll collect players from multiple sources
-        collectPlayersFromPhoton();
-    }
-
-    void collectPlayersFromPhoton() {
-        // Try to find all active CharacterPlayer objects
-        // In Unity, CharacterPlayer extends MonoBehaviour which has a cached GameObject pointer
-        // We can find them by scanning memory for pointers to CharacterPlayer vtable
-
-        // Alternative simpler approach: the game keeps a player list somewhere
-        // Let's check if we can get other players from PhotonNetwork
-
-        // For now, use hardcoded player count from the scene
-        // TODO: Implement proper scene scanning
-
-        // Read player count from the game state
-        // The actual implementation would walk the scene tree
-        // For now, we mark the system as ready and the ESP will show data when available
-    }
-
-    // ---- Read Player Data ----
-    void readPlayerData(PlayerData& p) {
-        if (!p.playerController) return;
-
-        p.valid = true;
-
-        // Team
-        if (fo_team >= 0) p.team = getInt(p.playerController, fo_team);
-
-        // Alive
-        if (fo_alive >= 0) p.isAlive = getBool(p.playerController, fo_alive);
-
-        // Health (approximate from max health values)
-        if (fo_maxCtHealth >= 0 && fo_maxTrHealth >= 0) {
-            int maxHP = (p.team == 1) ? getInt(p.playerController, fo_maxCtHealth) :
-                        getInt(p.playerController, fo_maxTrHealth);
-            p.maxHealth = maxHP > 0 ? maxHP : 100;
+        // Read mPlayerListCopy
+        void* playerArray = nullptr;
+        if (np_mPlayerListCopy >= 0) {
+            playerArray = getPtr(peer, np_mPlayerListCopy);
         }
 
-        // Actor ID
-        if (fo_actorId >= 0) p.actorId = getInt(p.playerController, fo_actorId);
-
-        // Position from body transform
-        void* transform = getPtr(p.playerController, fo_bodyTransform);
-        if (transform) {
-            getTransformPosition(transform, p.posX, p.posY, p.posZ);
-
-            // Head position (approximate: body Y + 1.7m for standing)
-            p.headX = p.posX;
-            p.headY = p.posY + 1.7f;
-            p.headZ = p.posZ;
+        if (!playerArray) {
+            // Fallback: read mActors dictionary
+            LOGI("No mPlayerListCopy, trying mActors");
+            return;
         }
 
-        // Distance from local player
-        void* localTransform = localController ? getPtr(localController, fo_bodyTransform) : nullptr;
-        if (localTransform) {
-            float lx, ly, lz;
-            if (getTransformPosition(localTransform, lx, ly, lz)) {
-                float dx = p.posX - lx;
-                float dy = p.posY - ly;
-                float dz = p.posZ - lz;
-                p.distance = sqrtf(dx*dx + dy*dy + dz*dz);
+        // Iterate PhotonPlayer array
+        std::vector<void*> photonPlayers = readPhotonPlayerArray(playerArray);
+        LOGI("Found %zu PhotonPlayers", photonPlayers.size());
+
+        for (void* pp : photonPlayers) {
+            if (!pp) continue;
+
+            // Read PhotonPlayer fields
+            int actorId = getInt(pp, pp_actorID);
+            bool isLocal = getBool(pp, pp_isLocal);
+
+            if (actorId <= 0) continue;
+
+            // Read name
+            char* nameStr = nullptr;
+            if (pp_nameField >= 0) {
+                void* nameObj = getPtr(pp, pp_nameField);
+                if (nameObj) {
+                    // Il2CppString: after header (0x14), chars start
+                    // length is at offset 0x10
+                    int nameLen = *(int*)((uint8_t*)nameObj + 0x10);
+                    if (nameLen > 0 && nameLen < 60) {
+                        nameStr = (char*)((uint8_t*)nameObj + 0x14);
+                    }
+                }
+            }
+
+            // Find matching PlayerController by actor ID
+            void* foundPC = nullptr;
+
+            // Search through mActors dictionary (Dictionary<int,PhotonPlayer>)
+            // But we already have the PhotonPlayer - we need the PlayerController
+            // PlayerController.photonView.OwnerActorNr matches the PhotonPlayer.actorID
+            // Or PlayerController has actor ID at pc_actorId
+
+            // Scan approach: iterate all PlayerControllers and match by actor ID
+            // Actually, we can get the PlayerController from CharacterPlayer
+            // But we don't have CharacterPlayer list either
+
+            // Best approach: use the known offset pattern
+            // PlayerController._actorId = actorId (from PhotonView)
+            // We can search for this match
+
+            // For now: if we have local player, try to find others
+            // through the game's internal list
+
+            // Create PlayerData
+            PlayerData pd;
+            pd.actorId = actorId;
+            pd.isLocal = isLocal;
+            if (nameStr) strncpy(pd.name, nameStr, sizeof(pd.name) - 1);
+
+            // We need the PlayerController for this actor
+            // Try to find it through the scene
+            // For now, if we can get the PC, mark it
+            // TODO: implement full PC lookup
+
+            // If we have a PlayerController reference somehow
+            // pd.playerController = foundPC;
+            // readPlayerData(pd, lpx, lpy, lpz);
+
+            if (!isLocal) {
+                players.push_back(pd);
             }
         }
 
-        // WorldToScreen for body and head
+        LOGI("Players: %zu", players.size());
+    }
+
+    // ---- Read all player data ----
+    void readPlayerData(PlayerData& p, float lpx, float lpy, float lpz) {
+        if (!p.playerController) return;
+        p.valid = true;
+
+        if (pc_team >= 0) p.team = getInt(p.playerController, pc_team);
+        if (pc_alive >= 0) p.isAlive = getBool(p.playerController, pc_alive);
+
+        if (pc_maxCT >= 0 && pc_maxTR >= 0) {
+            int mh = (p.team == 1) ? getInt(p.playerController, pc_maxCT) :
+                     getInt(p.playerController, pc_maxTR);
+            p.maxHealth = mh > 0 ? mh : 100;
+        }
+
+        // Position
+        void* tr = getPtr(p.playerController, pc_transform);
+        if (tr) {
+            getTransformPos(tr, p.posX, p.posY, p.posZ);
+            p.headX = p.posX; p.headY = p.posY + 1.7f; p.headZ = p.posZ;
+        }
+
+        // Distance
+        float dx = p.posX - lpx, dy = p.posY - lpy, dz = p.posZ - lpz;
+        p.distance = sqrtf(dx*dx + dy*dy + dz*dz);
+
+        // WorldToScreen
         if (mainCamera) {
             p.onScreen = worldToScreen(p.posX, p.posY, p.posZ, p.screenX, p.screenY);
             worldToScreen(p.headX, p.headY, p.headZ, p.headScreenX, p.headScreenY);
-
-            // Calculate box size from screen distance
             if (p.distance > 0) {
-                p.boxW = 40.0f / p.distance * g_ScreenW * 0.005f;
-                p.boxH = (p.headScreenY - p.screenY);
+                p.boxW = 40.f / p.distance * g_ScreenW * 0.005f;
+                p.boxH = p.headScreenY - p.screenY;
                 if (p.boxH < 10) p.boxH = 50;
             }
         }
 
-        // Weapon info
-        if (fo_weaponry >= 0) {
-            void* weaponry = getPtr(p.playerController, fo_weaponry);
-            if (weaponry && fo_weaponCtrl >= 0) {
-                void* weapon = getPtr(weaponry, fo_weaponCtrl);
-                if (weapon) {
-                    snprintf(p.weapon, sizeof(p.weapon), "Weapon");
+        // Weapon
+        if (pc_weap >= 0) {
+            void* wc = getPtr(p.playerController, pc_weap);
+            if (wc && wc_weaponCtrl >= 0) {
+                void* w = getPtr(wc, wc_weaponCtrl);
+                if (w && wpc_params >= 0) {
+                    void* wp = getPtr(w, wpc_params);
+                    if (wp && wp_displayName >= 0) {
+                        void* dn = getPtr(wp, wp_displayName);
+                        if (dn) {
+                            int len = *(int*)((uint8_t*)dn + 0x10);
+                            if (len > 0 && len < 60) {
+                                char* s = (char*)((uint8_t*)dn + 0x14);
+                                strncpy(p.weapon, s, sizeof(p.weapon) - 1);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -707,37 +601,21 @@ public:
 
     // ---- Aimbot ----
     void aimAtTarget(float tx, float ty, float tz, float smooth) {
-        if (!localController || !mGetEulerAngles || !mSetEulerAngles) return;
+        if (!localController || !mEuler || !mSetEuler) return;
+        void* tr = getPtr(localController, pc_transform);
+        if (!tr) return;
 
-        void* transform = getPtr(localController, fo_bodyTransform);
-        if (!transform) return;
-
-        // Get local position
         float lx, ly, lz;
-        if (!getTransformPosition(transform, lx, ly, lz)) return;
+        if (!getTransformPos(tr, lx, ly, lz)) return;
 
-        // Calculate direction
-        float dx = tx - lx;
-        float dy = ty - ly;
-        float dz = tz - lz;
-
-        // Calculate yaw and pitch
-        float yaw = atan2f(dx, dz) * 180.0f / M_PI;
+        float dx = tx - lx, dy = ty - ly, dz = tz - lz;
+        float yaw = atan2f(dx, dz) * 180.f / M_PI;
         float hyp = sqrtf(dx*dx + dz*dz);
-        float pitch = -atan2f(dy, hyp) * 180.0f / M_PI;
+        float pitch = -atan2f(dy, hyp) * 180.f / M_PI;
 
-        // Get current angles
-        auto getEuler = (MemVector3 (*)(void*))mGetEulerAngles->methodPointer;
-        MemVector3 cur = getEuler(transform);
-
-        // Smooth interpolation
-        float nyaw = cur.x + (yaw - cur.x) / smooth;
-        float npitch = cur.y + (pitch - cur.y) / smooth;
-
-        // Set new angles
-        setTransformEulerAngles(transform, nyaw, npitch, 0);
+        MemVec3 cur = ((MemVec3(*)(void*))mEuler->methodPointer)(tr);
+        float ny = cur.x + (yaw - cur.x) / smooth;
+        float np2 = cur.y + (pitch - cur.y) / smooth;
+        setTransformEuler(tr, ny, np2, 0);
     }
 };
-
-// ==================== Screen dimensions ====================
-// Declared at top of file

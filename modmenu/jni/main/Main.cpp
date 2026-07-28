@@ -345,14 +345,18 @@ static void gameUpdate() {
 
     gd.updateLocalPlayer();
     gd.updateCamera();
-
-    // Read camera matrices for WorldToScreen
-    if(gd.mainCamera) {
-        gd.readCameraMatrices();
-    }
-
-    // Collect players from scene
+    if(gd.mainCamera) gd.readCameraMatrices();
     gd.updatePlayers();
+
+    // Read player data for all found players
+    float lpx=0,lpy=0,lpz=0;
+    if(gd.localController) {
+        void* lt=getPtr(gd.localController, gd.pc_transform);
+        if(lt) gd.getTransformPos(lt, lpx, lpy, lpz);
+    }
+    for(auto& p:gd.players) {
+        if(p.playerController) gd.readPlayerData(p, lpx, lpy, lpz);
+    }
 }
 
 // ==================== Aimbot ====================
@@ -370,31 +374,21 @@ static void aimbotUpdate() {
     PlayerData* best=nullptr;
     float bestDist=fov;
 
+    int localTeam=getInt(gd.localController, gd.pc_team);
+
     for(auto& p:gd.players) {
         if(!p.valid||p.isLocal||!p.isAlive||p.team==0) continue;
-
-        // Skip teammates
-        int localTeam=GameOffsets::Team::NONE;
-        if(gd.fo_team>=0) localTeam=getInt(gd.localController,gd.fo_team);
         if(p.team==localTeam) continue;
-
         if(!p.onScreen) continue;
 
-        // Distance from crosshair to player center
         float dx=p.screenX-g_ScreenW*0.5f;
         float dy=p.screenY-g_ScreenH*0.5f;
         float dist=sqrtf(dx*dx+dy*dy);
 
-        if(dist<bestDist) {
-            bestDist=dist;
-            best=&p;
-        }
+        if(dist<bestDist) { bestDist=dist; best=&p; }
     }
 
-    if(best) {
-        // Aim at the best target
-        gd.aimAtTarget(best->headX,best->headY,best->headZ,smooth);
-    }
+    if(best) gd.aimAtTarget(best->headX, best->headY, best->headZ, smooth);
 }
 
 // ==================== Triggerbot ====================
