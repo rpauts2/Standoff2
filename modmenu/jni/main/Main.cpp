@@ -347,16 +347,6 @@ static void gameUpdate() {
     gd.updateCamera();
     if(gd.mainCamera) gd.readCameraMatrices();
     gd.updatePlayers();
-
-    // Read player data for all found players
-    float lpx=0,lpy=0,lpz=0;
-    if(gd.localController) {
-        void* lt=getPtr(gd.localController, gd.pc_transform);
-        if(lt) gd.getTransformPos(lt, lpx, lpy, lpz);
-    }
-    for(auto& p:gd.players) {
-        if(p.playerController) gd.readPlayerData(p, lpx, lpy, lpz);
-    }
 }
 
 // ==================== Aimbot ====================

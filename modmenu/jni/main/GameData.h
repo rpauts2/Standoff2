@@ -54,8 +54,6 @@ struct Il2CppMethodInfo {
     uint8_t is_virtual : 1;
     uint8_t is_static : 1;
     uint8_t is_final : 1;
-    uint8_t has_full_generic_sharing : 1;
-    uint8_t string_config_flag : 6;
 };
 
 struct Il2CppType {
@@ -139,14 +137,98 @@ struct MemVec3 { void* pad[2]; float x, y, z; };
 struct Mat4 { void* pad[2]; float m[16]; };
 struct ScreenPt { float x, y, z; };
 
-// Il2CppArray layout: klass(8) + monitor(8) + max_length(4) + padding(4) + elements[]
 struct Il2CppArray {
     void* klass;
     void* monitor;
     int32_t max_length;
     uint32_t _padding;
-    void* elements[1]; // variable length
+    void* elements[1];
 };
+
+// Il2CppString: klass(8) + monitor(8) + length(4) + padding(4) + chars[length*2+1]
+struct Il2CppString {
+    void* klass;
+    void* monitor;
+    int32_t length;
+    uint32_t _padding;
+    char16_t chars[1];
+};
+
+static std::string readIl2CppString(void* obj, int offset) {
+    if (!obj) return "";
+    Il2CppString* s = (Il2CppString*)((uint8_t*)obj + offset);
+    if (s->length <= 0 || s->length > 128) return "";
+    char buf[256] = {};
+    for (int i = 0; i < s->length && i < 127; i++)
+        buf[i] = (char)s->chars[i];
+    return std::string(buf);
+}
+
+// ==================== Memory Scanner ====================
+struct MemRegion {
+    uintptr_t start, end;
+    bool read, write, exec;
+};
+
+static std::vector<MemRegion> parseMaps() {
+    std::vector<MemRegion> regions;
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (!fp) return regions;
+    char line[512];
+    while (fgets(line, sizeof(line), fp)) {
+        MemRegion r = {};
+        char perms[5];
+        if (sscanf(line, "%lx-%lx %4s", &r.start, &r.end, perms) != 3) continue;
+        r.read = perms[0] == 'r';
+        r.write = perms[1] == 'w';
+        r.exec = perms[2] == 'x';
+        // Only scan writable non-executable regions (heap)
+        if (r.read && r.write && !r.exec && (r.end - r.start) > 0x10000)
+            regions.push_back(r);
+    }
+    fclose(fp);
+    return regions;
+}
+
+// Scan memory for pointers to a specific Il2CppClass
+// Returns list of valid object pointers
+static std::vector<void*> findObjectsOfClass(Il2CppClass* targetClass) {
+    std::vector<void*> result;
+    if (!targetClass) return result;
+
+    std::vector<MemRegion> regions = parseMaps();
+    LOGI("Scanning %zu regions for class %p", regions.size(), targetClass);
+
+    for (auto& reg : regions) {
+        uintptr_t start = reg.start;
+        uintptr_t end = reg.end;
+        uint8_t* ptr = (uint8_t*)start;
+
+        // Scan in 8-byte steps (pointer-aligned)
+        for (uintptr_t addr = start; addr < end - 8; addr += 8) {
+            void* val = *(void**)addr;
+            if (val == targetClass) {
+                // Found a pointer to our class - this is likely an object header
+                // Object layout: [class_ptr(8)][monitor(8)][fields...]
+                // The object itself is at 'addr'
+                void* obj = (void*)addr;
+
+                // Validate: check if the memory around it looks like a valid object
+                // Read a few fields and check if they're reasonable
+                // For MonoBehaviour: first field after header should be valid pointer or 0
+                uintptr_t objAddr = addr;
+
+                // Basic sanity: address should be in valid range
+                if (objAddr > 0x10000 && objAddr < 0x7FFFFFFFFFFF) {
+                    result.push_back(obj);
+                }
+            }
+        }
+    }
+
+    LOGI("Found %zu objects for class %p", result.size(), targetClass);
+    return result;
+}
 
 // ==================== PlayerData ====================
 struct PlayerData {
@@ -181,7 +263,8 @@ public:
     Il2CppClass *cWeapCtrl = nullptr, *cWeapon = nullptr, *cNet = nullptr;
     Il2CppClass *cPN = nullptr, *cNetPeer = nullptr, *cPP = nullptr;
     Il2CppClass *cCam = nullptr, *cObj = nullptr, *cTrans = nullptr;
-    Il2CppClass *cWeaponParams = nullptr;
+    Il2CppClass *cWeaponParams = nullptr, *cPV = nullptr;
+    Il2CppClass *cPCond = nullptr, *cFloatVal = nullptr;
 
     // Field offsets - PlayerController
     int pc_aim = -1, pc_move = -1, pc_weap = -1, pc_net = -1;
@@ -189,21 +272,15 @@ public:
     int pc_alive = -1, pc_alive2 = -1, pc_health = -1;
     int pc_photonView = -1, pc_actorId = -1;
     int pc_maxCT = -1, pc_maxTR = -1;
-    int pc_charView = -1;
 
     // Field offsets - NetworkingPeer
-    int np_localPlayer = -1;
-    int np_mActors = -1;
-    int np_mPlayerListCopy = -1;
-    int np_mOtherPlayerListCopy = -1;
+    int np_mActors = -1, np_mPlayerListCopy = -1;
 
     // Field offsets - PhotonPlayer
-    int pp_actorID = -1;
-    int pp_nameField = -1;
-    int pp_isLocal = -1;
+    int pp_actorID = -1, pp_nameField = -1, pp_isLocal = -1;
 
     // Field offsets - CharacterPlayer
-    int cp_playerController = -1;
+    int cp_pc = -1;
 
     // Field offsets - WeaponryController
     int wc_weaponCtrl = -1;
@@ -217,11 +294,13 @@ public:
     // Field offsets - PlayerManager
     int pm_localPlayer = -1;
 
+    // Field offsets - PhotonView
+    int pv_ownerId = -1;
+
     // Methods
     Il2CppMethodInfo *mW2S = nullptr, *mMain = nullptr;
     Il2CppMethodInfo *mPos = nullptr, *mEuler = nullptr, *mSetEuler = nullptr;
     Il2CppMethodInfo *mW2CMat = nullptr, *mProjMat = nullptr;
-    Il2CppMethodInfo *mGetPlayerList = nullptr;
 
     // State
     void* localController = nullptr;
@@ -230,48 +309,45 @@ public:
     bool hasMat = false;
     std::vector<PlayerData> players;
 
+    // Cached scan results (refresh every N frames)
+    std::vector<void*> cachedCharacterPlayers;
+    int scanCooldown = 0;
+
     void init() {
         if (initialized) return;
         if (!initIL2CPP()) return;
 
-        // Find classes
         auto fc = [](const char* i, const char* n, const char* c) { return findClass(i, n, c); };
         cPC = fc("Assembly-CSharp","Axlebolt.Standoff.Player","PlayerController");
         cPM = fc("Assembly-CSharp","Axlebolt.Standoff.Player","PlayerManager");
         cGC = fc("Assembly-CSharp","Axlebolt.Standoff.Game","GameController");
-        cGM = fc("Assembly-CSharp","Axlebolt.Standoff.Game","GameManager");
         cCharP = fc("Assembly-CSharp","Axlebolt.Standoff.Networking","CharacterPlayer");
-        cAim = fc("Assembly-CSharp","Axlebolt.Standoff.Player","AimController");
-        cMove = fc("Assembly-CSharp","Axlebolt.Standoff.Player","MovementController");
         cWeapCtrl = fc("Assembly-CSharp","Axlebolt.Standoff.Inventory","WeaponryController");
         cWeapon = fc("Assembly-CSharp","Axlebolt.Standoff.Inventory","WeaponController");
-        cNet = fc("Assembly-CSharp","Axlebolt.Standoff.Player","NetworkController");
         cPN = fc("PhotonUnityNetworking","Photon.Pun","PhotonNetwork");
         cNetPeer = fc("PhotonUnityNetworking","Photon.Pun","NetworkingPeer");
         cPP = fc("PhotonUnityNetworking","ExitGames.Client.Photon","PhotonPlayer");
         cCam = fc("UnityEngine.CoreModule","UnityEngine","Camera");
-        cObj = fc("UnityEngine.CoreModule","UnityEngine","Object");
         cTrans = fc("UnityEngine.CoreModule","UnityEngine","Transform");
         cWeaponParams = fc("Assembly-CSharp","Axlebolt.Standoff.Inventory","WeaponParameters");
+        cPV = fc("PhotonUnityNetworking","Photon.Pun","PhotonView");
+        cPCond = fc("Assembly-CSharp","Axlebolt.Standoff.Missions.Configuration","PlayerCondition");
+        cFloatVal = fc("Assembly-CSharp","Axlebolt.Standoff.Missions.Configuration","FloatValue");
 
-        // Fallbacks
         if (!cPC) cPC = fc("Assembly-CSharp","","PlayerController");
         if (!cPM) cPM = fc("Assembly-CSharp","","PlayerManager");
         if (!cCharP) cCharP = fc("Assembly-CSharp","","CharacterPlayer");
         if (!cPN) cPN = fc("PhotonUnityNetworking","","PhotonNetwork");
         if (!cNetPeer) cNetPeer = fc("PhotonUnityNetworking","","NetworkingPeer");
         if (!cPP) cPP = fc("PhotonUnityNetworking","","PhotonPlayer");
+        if (!cPV) cPV = fc("PhotonUnityNetworking","","PhotonView");
 
-        LOGI("Classes: PC=%p PM=%p PN=%p NP=%p PP=%p Cam=%p", cPC, cPM, cPN, cNetPeer, cPP, cCam);
+        LOGI("Classes: PC=%p CP=%p PN=%p NP=%p PP=%p PV=%p", cPC, cCharP, cPN, cNetPeer, cPP, cPV);
 
-        // Resolve offsets
         auto fo = [&](Il2CppClass* k, const char* f) -> int {
-            int o = getFieldOff(k, f);
-            if (o >= 0) LOGI("  %s = 0x%x", f, o);
-            return o;
+            int o = getFieldOff(k, f); return o;
         };
 
-        // PlayerController
         if (cPC) {
             pc_aim = fo(cPC,"<DAFBHDCBBFDBDBD>k__BackingField");
             pc_move = fo(cPC,"<DBHAFHFGGFGFECA>k__BackingField");
@@ -288,56 +364,35 @@ public:
             pc_maxCT = fo(cPC,"MaxCtHealth");
             pc_maxTR = fo(cPC,"MaxTrHealth");
         }
-
-        // CharacterPlayer
-        if (cCharP) cp_playerController = fo(cCharP,"DHGHGGFDECGFAEE");
-
-        // WeaponryController
+        if (cCharP) cp_pc = fo(cCharP,"DHGHGGFDECGFAEE");
         if (cWeapCtrl) wc_weaponCtrl = fo(cWeapCtrl,"<GBCHHHGABFGDBFD>k__BackingField");
-
-        // WeaponController
         if (cWeapon) wpc_params = fo(cWeapon,"<BAFFFEGDBGEECDA>k__BackingField");
-
-        // WeaponParameters
         if (cWeaponParams) wp_displayName = fo(cWeaponParams,"_displayName");
-
-        // PlayerManager
         if (cPM) pm_localPlayer = fo(cPM,"<CFCHCBFEEFHBAEH>k__BackingField");
-
-        // NetworkingPeer
         if (cNetPeer) {
-            np_localPlayer = fo(cNetPeer,"<LocalPlayer>k__BackingField");
             np_mActors = fo(cNetPeer,"mActors");
             np_mPlayerListCopy = fo(cNetPeer,"mPlayerListCopy");
-            np_mOtherPlayerListCopy = fo(cNetPeer,"mOtherPlayerListCopy");
         }
-
-        // PhotonPlayer
         if (cPP) {
             pp_actorID = fo(cPP,"actorID");
             pp_nameField = fo(cPP,"nameField");
             pp_isLocal = fo(cPP,"IsLocal");
         }
-
-        // PhotonNetwork
-        if (cPN) {
-            mGetPlayerList = getMethod(cPN,"get_playerList",0);
-            LOGI("PhotonNetwork.playerList: %p", mGetPlayerList);
+        if (cPV) {
+            pv_ownerId = fo(cPV,"ownerId");
+            LOGI("PhotonView.ownerId offset: 0x%x", pv_ownerId);
         }
 
-        // Methods
         if (cCam) {
             mW2S = getMethod(cCam,"WorldToScreenPoint",1);
             mMain = getMethod(cCam,"get_main",0);
             mW2CMat = getMethod(cCam,"get_worldToCameraMatrix",0);
             mProjMat = getMethod(cCam,"get_projectionMatrix",0);
-            LOGI("Cam: W2S=%p main=%p w2c=%p proj=%p", mW2S, mMain, mW2CMat, mProjMat);
         }
         if (cTrans) {
             mPos = getMethod(cTrans,"get_position",0);
             mEuler = getMethod(cTrans,"get_eulerAngles",0);
             mSetEuler = getMethod(cTrans,"set_eulerAngles",1);
-            LOGI("Trans: pos=%p euler=%p setEuler=%p", mPos, mEuler, mSetEuler);
         }
 
         initialized = true;
@@ -349,10 +404,7 @@ public:
     void updateCamera() {
         if (!mMain || !mMain->methodPointer) return;
         mainCamera = ((void* (*)())mMain->methodPointer)();
-        if (mainCamera) {
-            LOGI("Camera.main: %p", mainCamera);
-            readCameraMatrices();
-        }
+        if (mainCamera) readCameraMatrices();
     }
 
     void readCameraMatrices() {
@@ -385,60 +437,65 @@ public:
         ((void(*)(void*,float,float,float))mSetEuler->methodPointer)(t, x, y, z);
     }
 
-    // ---- Get NetworkingPeer instance ----
+    // ---- NetworkingPeer ----
     void* getNetworkingPeer() {
-        if (!cPN || !cNetPeer) return nullptr;
-
-        // PhotonNetwork is a static class; its instance fields live in static field data
+        if (!cPN) return nullptr;
         void* sd = il2cpp.class_get_static_field_data ? il2cpp.class_get_static_field_data(cPN) : nullptr;
-        if (!sd) {
-            // Fallback: try to find via PhotonNetwork.networkingPeer field offset
-            int off = getFieldOff(cPN, "networkingPeer");
-            if (off < 0) {
-                // Scan all fields for NetworkingPeer type
-                // The field name might be obfuscated
-                // From dump.cs: networkingPeer is at offset 0x18 in the class
-                off = 0x18; // Known offset from dump.cs
-            }
-            return getPtr(nullptr, 0); // Need static data
-        }
-        return getPtr(sd, 0x18); // networkingPeer offset from dump.cs
+        if (!sd) return nullptr;
+        // networkingPeer is an instance field of the static class, at offset from static field data
+        // From dump.cs: PhotonNetwork.networkingPeer is at class offset 0x18
+        // In static field data, instance fields of a static class are stored sequentially
+        return getPtr(sd, 0);
     }
 
-    // ---- Read PhotonPlayer array ----
-    std::vector<void*> readPhotonPlayerArray(void* arrayObj) {
-        std::vector<void*> result;
-        if (!arrayObj) return result;
-
-        Il2CppArray* arr = (Il2CppArray*)arrayObj;
-        int count = arr->max_length;
-        if (count <= 0 || count > 64) return result;
-
-        for (int i = 0; i < count; i++) {
-            void* elem = arr->elements[i];
-            if (elem) result.push_back(elem);
-        }
-        return result;
+    // ---- Read PhotonPlayer[] ----
+    std::vector<void*> readPPArray(void* arrObj) {
+        std::vector<void*> r;
+        if (!arrObj) return r;
+        Il2CppArray* a = (Il2CppArray*)arrObj;
+        int cnt = a->max_length;
+        if (cnt <= 0 || cnt > 64) return r;
+        for (int i = 0; i < cnt; i++)
+            if (a->elements[i]) r.push_back(a->elements[i]);
+        return r;
     }
 
     // ---- Local Player ----
     void updateLocalPlayer() {
         localController = nullptr;
-
-        // Method 1: PlayerManager static field
         if (cPM && pm_localPlayer >= 0) {
             void* sd = il2cpp.class_get_static_field_data ?
                        il2cpp.class_get_static_field_data(cPM) : nullptr;
             if (sd) localController = getPtr(sd, pm_localPlayer);
         }
+        if (localController) LOGI("Local: %p", localController);
+    }
 
-        // Method 2: NetworkingPeer.LocalPlayer
-        if (!localController && cNetPeer && np_localPlayer >= 0) {
-            void* peer = getNetworkingPeer();
-            if (peer) localController = getPtr(peer, np_localPlayer);
+    // ---- Find PlayerController by actor ID ----
+    void* findPCByActorId(int actorId) {
+        if (!cCharP || !cp_pc || !cPV || pv_ownerId < 0) return nullptr;
+
+        // Refresh scan cache periodically
+        if (scanCooldown <= 0 || cachedCharacterPlayers.empty()) {
+            cachedCharacterPlayers = findObjectsOfClass(cCharP);
+            scanCooldown = 300; // refresh every ~5 seconds at 60fps
         }
+        scanCooldown--;
 
-        if (localController) LOGI("Local player: %p", localController);
+        for (void* cp : cachedCharacterPlayers) {
+            if (!cp) continue;
+            void* pc = getPtr(cp, cp_pc);
+            if (!pc) continue;
+
+            // Read PhotonView from PlayerController
+            void* pv = getPtr(pc, pc_photonView);
+            if (!pv) continue;
+
+            // Read ownerId from PhotonView
+            int oid = getInt(pv, pv_ownerId);
+            if (oid == actorId) return pc;
+        }
+        return nullptr;
     }
 
     // ---- Scene Scan via Photon ----
@@ -447,156 +504,105 @@ public:
         if (!localController) return;
 
         int localTeam = getInt(localController, pc_team);
-
-        // Get local position for distance calc
         float lpx = 0, lpy = 0, lpz = 0;
         void* lt = getPtr(localController, pc_transform);
         if (lt) getTransformPos(lt, lpx, lpy, lpz);
 
-        // Get NetworkingPeer
-        void* peer = getNetworkingPeer();
+        // Get PhotonNetwork static fields
+        void* pnSD = il2cpp.class_get_static_field_data ?
+                     il2cpp.class_get_static_field_data(cPN) : nullptr;
+        if (!pnSD) return;
+
+        // PhotonNetwork.networkingPeer is at offset 0x18 in static field data
+        void* peer = getPtr(pnSD, 0);
         if (!peer) {
-            LOGI("No NetworkingPeer");
+            LOGI("No peer");
             return;
         }
 
-        // Read mPlayerListCopy
-        void* playerArray = nullptr;
-        if (np_mPlayerListCopy >= 0) {
-            playerArray = getPtr(peer, np_mPlayerListCopy);
-        }
+        // Read mPlayerListCopy from NetworkingPeer
+        void* ppArray = nullptr;
+        if (np_mPlayerListCopy >= 0)
+            ppArray = getPtr(peer, np_mPlayerListCopy);
 
-        if (!playerArray) {
-            // Fallback: read mActors dictionary
-            LOGI("No mPlayerListCopy, trying mActors");
+        if (!ppArray) {
+            LOGI("No mPlayerListCopy");
             return;
         }
 
-        // Iterate PhotonPlayer array
-        std::vector<void*> photonPlayers = readPhotonPlayerArray(playerArray);
-        LOGI("Found %zu PhotonPlayers", photonPlayers.size());
+        std::vector<void*> ppList = readPPArray(ppArray);
+        LOGI("PhotonPlayers: %zu", ppList.size());
 
-        for (void* pp : photonPlayers) {
+        for (void* pp : ppList) {
             if (!pp) continue;
-
-            // Read PhotonPlayer fields
             int actorId = getInt(pp, pp_actorID);
             bool isLocal = getBool(pp, pp_isLocal);
-
             if (actorId <= 0) continue;
 
-            // Read name
-            char* nameStr = nullptr;
-            if (pp_nameField >= 0) {
-                void* nameObj = getPtr(pp, pp_nameField);
-                if (nameObj) {
-                    // Il2CppString: after header (0x14), chars start
-                    // length is at offset 0x10
-                    int nameLen = *(int*)((uint8_t*)nameObj + 0x10);
-                    if (nameLen > 0 && nameLen < 60) {
-                        nameStr = (char*)((uint8_t*)nameObj + 0x14);
-                    }
-                }
-            }
-
-            // Find matching PlayerController by actor ID
-            void* foundPC = nullptr;
-
-            // Search through mActors dictionary (Dictionary<int,PhotonPlayer>)
-            // But we already have the PhotonPlayer - we need the PlayerController
-            // PlayerController.photonView.OwnerActorNr matches the PhotonPlayer.actorID
-            // Or PlayerController has actor ID at pc_actorId
-
-            // Scan approach: iterate all PlayerControllers and match by actor ID
-            // Actually, we can get the PlayerController from CharacterPlayer
-            // But we don't have CharacterPlayer list either
-
-            // Best approach: use the known offset pattern
-            // PlayerController._actorId = actorId (from PhotonView)
-            // We can search for this match
-
-            // For now: if we have local player, try to find others
-            // through the game's internal list
-
-            // Create PlayerData
             PlayerData pd;
             pd.actorId = actorId;
             pd.isLocal = isLocal;
-            if (nameStr) strncpy(pd.name, nameStr, sizeof(pd.name) - 1);
 
-            // We need the PlayerController for this actor
-            // Try to find it through the scene
-            // For now, if we can get the PC, mark it
-            // TODO: implement full PC lookup
+            // Read name
+            std::string nm = readIl2CppString(pp, pp_nameField);
+            if (!nm.empty()) strncpy(pd.name, nm.c_str(), sizeof(pd.name) - 1);
 
-            // If we have a PlayerController reference somehow
-            // pd.playerController = foundPC;
-            // readPlayerData(pd, lpx, lpy, lpz);
+            // Find matching PlayerController
+            void* pc = findPCByActorId(actorId);
+            if (pc) {
+                pd.playerController = pc;
+                pd.valid = true;
 
-            if (!isLocal) {
-                players.push_back(pd);
-            }
-        }
+                // Read all data
+                if (pc_team >= 0) pd.team = getInt(pc, pc_team);
+                if (pc_alive >= 0) pd.isAlive = getBool(pc, pc_alive);
+                if (pc_actorId >= 0) pd.actorId = getInt(pc, pc_actorId);
 
-        LOGI("Players: %zu", players.size());
-    }
+                // Health from max values
+                if (pc_maxCT >= 0 && pc_maxTR >= 0) {
+                    int mh = (pd.team == 1) ? getInt(pc, pc_maxCT) : getInt(pc, pc_maxTR);
+                    pd.maxHealth = mh > 0 ? mh : 100;
+                }
 
-    // ---- Read all player data ----
-    void readPlayerData(PlayerData& p, float lpx, float lpy, float lpz) {
-        if (!p.playerController) return;
-        p.valid = true;
+                // Position
+                void* tr = getPtr(pc, pc_transform);
+                if (tr) {
+                    getTransformPos(tr, pd.posX, pd.posY, pd.posZ);
+                    pd.headX = pd.posX; pd.headY = pd.posY + 1.7f; pd.headZ = pd.posZ;
+                }
 
-        if (pc_team >= 0) p.team = getInt(p.playerController, pc_team);
-        if (pc_alive >= 0) p.isAlive = getBool(p.playerController, pc_alive);
+                // Distance
+                float dx = pd.posX - lpx, dy = pd.posY - lpy, dz = pd.posZ - lpz;
+                pd.distance = sqrtf(dx*dx + dy*dy + dz*dz);
 
-        if (pc_maxCT >= 0 && pc_maxTR >= 0) {
-            int mh = (p.team == 1) ? getInt(p.playerController, pc_maxCT) :
-                     getInt(p.playerController, pc_maxTR);
-            p.maxHealth = mh > 0 ? mh : 100;
-        }
+                // WorldToScreen
+                if (mainCamera) {
+                    pd.onScreen = worldToScreen(pd.posX, pd.posY, pd.posZ, pd.screenX, pd.screenY);
+                    worldToScreen(pd.headX, pd.headY, pd.headZ, pd.headScreenX, pd.headScreenY);
+                    if (pd.distance > 0) {
+                        pd.boxW = 40.f / pd.distance * g_ScreenW * 0.005f;
+                        pd.boxH = pd.headScreenY - pd.screenY;
+                        if (pd.boxH < 10) pd.boxH = 50;
+                    }
+                }
 
-        // Position
-        void* tr = getPtr(p.playerController, pc_transform);
-        if (tr) {
-            getTransformPos(tr, p.posX, p.posY, p.posZ);
-            p.headX = p.posX; p.headY = p.posY + 1.7f; p.headZ = p.posZ;
-        }
-
-        // Distance
-        float dx = p.posX - lpx, dy = p.posY - lpy, dz = p.posZ - lpz;
-        p.distance = sqrtf(dx*dx + dy*dy + dz*dz);
-
-        // WorldToScreen
-        if (mainCamera) {
-            p.onScreen = worldToScreen(p.posX, p.posY, p.posZ, p.screenX, p.screenY);
-            worldToScreen(p.headX, p.headY, p.headZ, p.headScreenX, p.headScreenY);
-            if (p.distance > 0) {
-                p.boxW = 40.f / p.distance * g_ScreenW * 0.005f;
-                p.boxH = p.headScreenY - p.screenY;
-                if (p.boxH < 10) p.boxH = 50;
-            }
-        }
-
-        // Weapon
-        if (pc_weap >= 0) {
-            void* wc = getPtr(p.playerController, pc_weap);
-            if (wc && wc_weaponCtrl >= 0) {
-                void* w = getPtr(wc, wc_weaponCtrl);
-                if (w && wpc_params >= 0) {
-                    void* wp = getPtr(w, wpc_params);
-                    if (wp && wp_displayName >= 0) {
-                        void* dn = getPtr(wp, wp_displayName);
-                        if (dn) {
-                            int len = *(int*)((uint8_t*)dn + 0x10);
-                            if (len > 0 && len < 60) {
-                                char* s = (char*)((uint8_t*)dn + 0x14);
-                                strncpy(p.weapon, s, sizeof(p.weapon) - 1);
-                            }
+                // Weapon
+                if (pc_weap >= 0) {
+                    void* wc = getPtr(pc, pc_weap);
+                    if (wc && wc_weaponCtrl >= 0) {
+                        void* w = getPtr(wc, wc_weaponCtrl);
+                        if (w && wpc_params >= 0) {
+                            void* wp = getPtr(w, wpc_params);
+                            std::string wn = readIl2CppString(wp, wp_displayName);
+                            if (!wn.empty()) strncpy(pd.weapon, wn.c_str(), sizeof(pd.weapon) - 1);
                         }
                     }
                 }
             }
+
+            if (!isLocal) players.push_back(pd);
         }
+        LOGI("Players: %zu", players.size());
     }
 
     // ---- Aimbot ----
@@ -604,15 +610,12 @@ public:
         if (!localController || !mEuler || !mSetEuler) return;
         void* tr = getPtr(localController, pc_transform);
         if (!tr) return;
-
         float lx, ly, lz;
         if (!getTransformPos(tr, lx, ly, lz)) return;
-
         float dx = tx - lx, dy = ty - ly, dz = tz - lz;
         float yaw = atan2f(dx, dz) * 180.f / M_PI;
         float hyp = sqrtf(dx*dx + dz*dz);
         float pitch = -atan2f(dy, hyp) * 180.f / M_PI;
-
         MemVec3 cur = ((MemVec3(*)(void*))mEuler->methodPointer)(tr);
         float ny = cur.x + (yaw - cur.x) / smooth;
         float np2 = cur.y + (pitch - cur.y) / smooth;
